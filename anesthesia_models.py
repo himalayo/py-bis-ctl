@@ -16,9 +16,7 @@ class Drug:
         B = np.array([[1/v[0]],[0],[0],[0]])
         C = np.array([0,0,0,1])
         self.ss = ct.ss(A,B,C,0)
-
-    def to_io(self):
-        return ct.ss2io(self.ss)
+        self.io = ct.ss2io(self.ss)
 
 class Propofol(Drug):
     def __init__(self,p):
