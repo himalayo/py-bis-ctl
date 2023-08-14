@@ -1,11 +1,6 @@
 import numpy as np
 import control as ct
-
-class Patient:
-    def __init__(self,age,height,weight):
-        self.age = age
-        self.height = height
-        self.weight = weight
+from patient import Patient
 
 class Drug:
     def __init__(self,k,v):
@@ -19,7 +14,7 @@ class Drug:
         self.io = ct.ss2io(self.ss)
 
 class Propofol(Drug):
-    def __init__(self,p):
+    def __init__(self,p: Patient):
         def get_v(patient):
             v_1 = 5.1 - (0.0201 * (patient.age - 40)) + (0.072 * (patient.lbm - 55))
             v_2 = 9.82 - (0.0811 * (patient.age - 40)) + (0.108 * (patient.lbm - 55))
