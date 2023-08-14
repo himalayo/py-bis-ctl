@@ -1,10 +1,11 @@
+import matplotlib.pyplot as plt
 import numpy as np
 import control as ct
-from patient import Patient
+from patient import Patient, Gender
 
 class Drug:
     def __init__(self,k,v):
-        A = np.array([[-(k[0]+k[1]+k[2]),(v[1]/v[0])*k[3],(v[2]/v[0])*k[4]],
+        A = np.array([[-(k[0]+k[1]+k[2]),(v[1]/v[0])*k[3],(v[2]/v[0])*k[4],0],
                       [(v[0]/v[1])*k[1],-k[3],0,0],
                       [(v[0]/v[2])*k[2],0,-k[3],0],
                       [k[5],0,0,k[5]]])
@@ -64,3 +65,7 @@ class Remifentanil(Drug):
             return k_10, k_12, k_13, k_21, k_31, k_e0
         self.patient = p
         super().__init__(get_k(p),get_v(p))
+
+def test():
+    plt.plot(ct.step_response(Remifentanil(Patient(50,170,80,Gender.F)).io).outputs)
+    plt.show()

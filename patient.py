@@ -2,21 +2,22 @@ import numpy as np
 from enum import Enum
 
 class Gender(Enum):
-    M=0,
+    M=0
     F=1
 
-    def __init__(self,value: str|int|bool|float|None):
+    def parse(value: str|int|bool|float|None):
         match value:
             case str():
-                self = Gender.M if value.lower().startswith('m') else Gender.F
+                val = Gender.M if value.lower().startswith('m') else Gender.F 
             case float():
-                self = Gender.M if int(value) == 0 else Gender.F
+                val = Gender.M if int(value) == 0 else Gender.F 
             case bool():
-                self = Gender.F if value else Gender.M
+                val = Gender.F if value else Gender.M 
             case int():
-                self = Gender.M if value == 0 else Gender.F
+                val = Gender.M if value == 0 else Gender.F 
             case None:
-                self = Gender.M
+                val = Gender.M 
+        return val
 
     def __str__(self):
         match self:
@@ -41,4 +42,24 @@ class Patient:
         self.height = height
         self.weight = weight 
         self.gender = gender
+        if self.gender.is_female():
+            self.lbm = (1.07*self.weight) - (((148*self.weight)**2)/(self.height**2))
+        else: 
+            self.lbm = (1.1*self.weight) - (((128*self.weight)**2)/(self.height**2))
+
+
         self.np = np.array([self.age,float(self.gender),self.height,self.weight])
+    
+    def __str__(self):
+        return f"Age: {self.age}, Height: {self.height}, Weight: {self.weight}, Gender: {str(self.gender)}, np: {self.np}"
+
+def test():
+    genders = [Gender.parse('F'),Gender.parse('f'),Gender.parse(1),Gender.parse(1.0),Gender.parse(True)]
+    assert(all(genders))
+    assert(Gender(not all(genders)) == Gender.M)
+    assert(not Gender.M)
+    assert(Gender.F)
+    assert(Gender(int(Gender.F)) == Gender.F)
+    assert(Gender(int(Gender.M)) == Gender.M)
+    patient = Patient(50,170,80,genders[0])
+    print(patient)
