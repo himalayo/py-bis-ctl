@@ -4,8 +4,8 @@ import control as ct
 from patient import Patient,Gender
 from keras.models import load_model
 
-
-
+mean_c =np.array([ 56.50928621,0.49630326,61.13655517,162.0409402])
+std_c =np.array([15.38680592, 0.49998633, 9.23908289, 8.33116551])
 
 class Predictor:
     def __call__(self,u: np.ndarray):
@@ -30,7 +30,7 @@ class Neural(Predictor):
             remi = np.array(params['remi']).reshape([len(params['remi']),1])
             def gen_nnet_inputs(remi,prop,patient):
                 def to_case(remi,prop,patient):
-                    clinical = np.broadcast_to(patient.np,[remi.shape[0],4])
+                    clinical = np.broadcast_to((patient.np-mean_c)/std_c,[remi.shape[0],4])
                     return np.hstack((remi,prop,clinical))
                 case = to_case(remi,prop,patient)
                 
@@ -44,7 +44,6 @@ class Neural(Predictor):
                 case_p= []
                 case_r = []
                 case_c = []
-
                 for i,row in enumerate(case):
                     ppf_dose = row[0]
                     rft_dose = row[1]
@@ -81,6 +80,6 @@ def test():
    plt.figure()
    plt.plot(PKPD(1,1.5,5,20)(np.array([np.sin(np.linspace(0,2*np.pi,100))+1,np.sin(np.linspace(0,3*np.pi,100))+1]))[0])
    plt.figure()
-   plt.plot(Neural('c:/py/doa/2017/output/weights',Patient(50,170,70,Gender.F))(np.array([np.sin(np.linspace(0,2*np.pi,5000))*1e-5+1e-5,np.sin(np.linspace(0,3*np.pi,5000))*1e-5+1e-5]))[0])
+   plt.plot(Neural('c:/py/doa/2017/output/weights',Patient(50,170,70,Gender.F))(np.array([np.sin(np.linspace(0,2*np.pi,50))*1e-5+1e-5,np.sin(np.linspace(0,3*np.pi,50))*1e-5+1e-5]))[0])
    plt.figure()
-   plt.plot(Neural('c:/py/doa/2017/output/weights',Patient(50,170,70,Gender.F))(np.ones([2,5000]))[0])
+   plt.plot(Neural('c:/py/doa/2017/output/weights',Patient(50,170,70,Gender.F))(np.ones([2,50]))[0])
