@@ -65,9 +65,11 @@ def test():
     print(Remifentanil(Patient(50,170,80,Gender.F)).ss.B)
     print(Propofol(Patient(50,170,80,Gender.F)).ss.A)
     print(Propofol(Patient(50,170,80,Gender.F)).ss.B)
+    plt.figure()
     plt.plot(ct.step_response(Remifentanil(Patient(50,170,80,Gender.F)).io).outputs)
     plt.plot(ct.step_response(Propofol(Patient(50,170,80,Gender.F)).io).outputs)
     plt.figure()
     plt.plot(ct.impulse_response(Remifentanil(Patient(50,170,80,Gender.F)).io).outputs)
     plt.plot(ct.impulse_response(Propofol(Patient(50,170,80,Gender.F)).io).outputs)
-    plt.show()
+
+    

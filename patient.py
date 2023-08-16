@@ -47,8 +47,7 @@ class Patient:
         else: 
             self.lbm = (1.1*self.weight) - (((128*self.weight)**2)/(self.height**2))
 
-
-        self.np = np.array([self.age,float(self.gender),self.height,self.weight])
+        self.np = np.array([self.age,float(self.gender),self.weight,self.height])
     
     def __str__(self):
         return f"Age: {self.age}, Height: {self.height}, Weight: {self.weight}, Gender: {str(self.gender)}, np: {self.np}"
