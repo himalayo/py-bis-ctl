@@ -80,6 +80,6 @@ def test():
    plt.figure()
    plt.plot(PKPD(1,1.5,5,20)(np.array([np.sin(np.linspace(0,2*np.pi,100))+1,np.sin(np.linspace(0,3*np.pi,100))+1]))[0])
    plt.figure()
-   plt.plot(Neural('c:/py/doa/2017/output/weights',Patient(50,170,70,Gender.F))(np.array([np.sin(np.linspace(0,2*np.pi,50))*1e-5+1e-5,np.sin(np.linspace(0,3*np.pi,50))*1e-5+1e-5]))[0])
+   plt.plot(Neural('./weights',Patient(50,170,70,Gender.F))(np.array([np.sin(np.linspace(0,2*np.pi,50))*1e-5+1e-5,np.sin(np.linspace(0,3*np.pi,50))*1e-5+1e-5]))[0])
    plt.figure()
-   plt.plot(Neural('c:/py/doa/2017/output/weights',Patient(50,170,70,Gender.F))(np.ones([2,50]))[0])
+   plt.plot(Neural('./weights',Patient(50,170,70,Gender.F))(np.ones([2,50]))[0])
