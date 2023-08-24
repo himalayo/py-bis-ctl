@@ -1,6 +1,8 @@
 import matplotlib.pyplot as plt
 import numpy as np
+import math
 import control as ct
+import time
 from patient import Patient,Gender
 from keras.models import load_model
 
@@ -9,7 +11,7 @@ std_c =np.array([15.38680592, 0.49998633, 9.23908289, 8.33116551])
 
 class Predictor:
     def __call__(self,u: np.ndarray):
-        return ct.input_output_response(self.io,np.arange(u.shape[1]),u).outputs
+        return ct.input_output_response(self.io,np.arange(u.shape[1]),u,X0=self.x0).outputs
 
 class PKPD(Predictor):
     def __init__(self,beta,gamma,cp50,cr50):
@@ -20,14 +22,43 @@ class PKPD(Predictor):
             u50 = 1 - (beta*phi) + (beta*phi**2)
             return 97.7  * ( 1- ( ( (( u_prop + u_remi )/u50 )**gamma )/( 1 + ( ((u_prop + u_remi)/u50)**gamma) ) ) )
         self.io = ct.NonlinearIOSystem(lambda t,x,u,params: x,lambda t,x,u,params=None: hill(beta,gamma,cp50,cr50,u[0],u[1]),inputs=2,states=2,outputs=1)
+        self.x0=[0,0]
 
 class Neural(Predictor):
     def __init__(self,path,patient: Patient):
+        self.x0 = 0.97
         def state_update(t,x,u,params):
-            params['prop'].append(u[0])
-            params['remi'].append(u[1])
-            prop = np.array(params['prop']).reshape([len(params['prop']),1])
-            remi = np.array(params['remi']).reshape([len(params['remi']),1])
+            st = time.time()  
+            def accum(seq):
+                out = np.zeros(180)
+                np.copyto(out[-min(math.ceil(len(seq)/10),180):],list(map(sum,np.array_split(seq,math.ceil(len(seq)/10))[-180:])))
+                return out
+
+            if t <= 1e-4:
+                params['prop'] = [u[0]]
+                params['remi'] = [u[1]]
+                params['prop_input'] = accum(np.array([u[0]]))
+                params['remi_input'] = accum(np.array([u[1]]))
+                params['micro_prop'] = [u[0]]
+                params['micro_remi'] = [u[1]]
+                params['t'] = [t]
+                params['last_t'] = t
+                params['nnet'].reset_states()
+            elif t-params['last_t'] >= 1:
+                params['micro_prop'].append(u[0])
+                params['micro_remi'].append(u[1])
+                params['prop'].append(sum(params['micro_prop']))
+                params['remi'].append(sum(params['micro_remi']))
+                np.append(params['prop_input'],accum(np.array(params['prop'])))
+                np.append(params['remi_input'],accum(np.array(params['remi'])))
+                params['t'].append(t)
+                params['last_t'] = t
+                params['micro_prop'] = []
+                params['micro_remi'] = []
+            else:
+                params['micro_prop'].append(u[0])
+                params['micro_remi'].append(u[1])
+            """
             def gen_nnet_inputs(remi,prop,patient):
                 def to_case(remi,prop,patient):
                     clinical = np.broadcast_to((patient.np-mean_c)/std_c,[remi.shape[0],4])
@@ -69,12 +100,13 @@ class Neural(Predictor):
                 case_p = np.array(case_p)
                 case_r = np.array(case_r)
                 return case_p.reshape(case_p.shape[0],case_p.shape[1],1)/12, case_r.reshape(case_r.shape[0],case_r.shape[1],1)/12, np.array(case_c)
-            out = params['nnet'](gen_nnet_inputs(prop,remi,params['patient']))
-            print(prop[-1],remi[-1],out[-1])
-            return out[-1]
+            """
+            out = params['nnet'].predict((params['prop_input'].reshape((math.ceil(params['prop_input'].shape[0]/180),180,1)),params['remi_input'].reshape((math.ceil(params['remi_input'].shape[0]/180),180,1)),np.broadcast_to((params['patient'].np-mean_c)/std_c,[math.ceil(params['remi_input'].shape[0]/180),4])),verbose=None)
+            return out[-1]-x 
+
         self.nnet = load_model(path)
         self.params = {'prop': [], 'remi': [], 'patient': patient,'nnet':self.nnet}
-        self.io = ct.NonlinearIOSystem(lambda t,x,u,params: u,outfcn=state_update,params=self.params,inputs=2,states=2,outputs=1)
+        self.io = ct.NonlinearIOSystem(state_update,lambda t,x,u,params: x,params=self.params,inputs=2,states=1,outputs=1)
 
 def test():
    plt.figure()
