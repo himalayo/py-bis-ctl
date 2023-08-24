@@ -11,7 +11,10 @@ std_c =np.array([15.38680592, 0.49998633, 9.23908289, 8.33116551])
 
 class Predictor:
     def __call__(self,u: np.ndarray):
-        return ct.input_output_response(self.io,np.arange(u.shape[1]),u,X0=self.x0).outputs
+        st = time.time()
+        out = ct.input_output_response(self.io,np.arange(u.shape[1]),u,X0=self.x0).outputs
+        print(time.time()-st)
+        return out
 
 class PKPD(Predictor):
     def __init__(self,beta,gamma,cp50,cr50):
@@ -26,92 +29,49 @@ class PKPD(Predictor):
 
 class Neural(Predictor):
     def __init__(self,path,patient: Patient):
-        self.x0 = 0.97
         def state_update(t,x,u,params):
-            st = time.time()  
             def accum(seq):
-                out = np.zeros(180)
-                np.copyto(out[-min(math.ceil(len(seq)/10),180):],list(map(sum,np.array_split(seq,math.ceil(len(seq)/10))[-180:])))
+                out = np.zeros([1,180,1])
+                np.copyto(out[0,-min(math.ceil(len(seq)/10),180):,0],list(map(sum,np.array_split(seq,math.ceil(len(seq)/10))[-180:])))
                 return out
-
             if t <= 1e-4:
-                params['prop'] = [u[0]]
-                params['remi'] = [u[1]]
-                params['prop_input'] = accum(np.array([u[0]]))
-                params['remi_input'] = accum(np.array([u[1]]))
+                params['prop'] = np.array([u[0]/12])
+                params['remi'] = np.array([u[1]/12])
+                params['prop_input'] = accum(np.array([u[0]/12]))
+                params['remi_input'] = accum(np.array([u[1]/12]))
+                out = params['nnet'].predict((params['prop_input'],params['remi_input'],np.broadcast_to((params['patient'].np-mean_c)/std_c,[params['prop_input'].shape[0],4])),verbose=None)
+                params['last_out'] = out[-1]
+                params['last_t'] = t
                 params['micro_prop'] = [u[0]]
                 params['micro_remi'] = [u[1]]
-                params['t'] = [t]
-                params['last_t'] = t
                 params['nnet'].reset_states()
             elif t-params['last_t'] >= 1:
+                params['last_t'] = t
                 params['micro_prop'].append(u[0])
                 params['micro_remi'].append(u[1])
-                params['prop'].append(sum(params['micro_prop']))
-                params['remi'].append(sum(params['micro_remi']))
-                np.append(params['prop_input'],accum(np.array(params['prop'])))
-                np.append(params['remi_input'],accum(np.array(params['remi'])))
-                params['t'].append(t)
-                params['last_t'] = t
+                params['prop'] = np.append(params['prop'],(sum(params['micro_prop'])/12))
+                params['remi'] = np.append(params['remi'],(sum(params['micro_remi'])/12))
+                params['prop_input'] = accum(params['prop'])
+                params['remi_input'] = accum(params['remi'])
+                out = params['nnet'].predict((params['prop_input'],params['remi_input'],np.broadcast_to((params['patient'].np-mean_c)/std_c,[params['prop_input'].shape[0],4])),verbose=None)
+                params['last_out'] = out[-1]
                 params['micro_prop'] = []
                 params['micro_remi'] = []
             else:
                 params['micro_prop'].append(u[0])
                 params['micro_remi'].append(u[1])
-            """
-            def gen_nnet_inputs(remi,prop,patient):
-                def to_case(remi,prop,patient):
-                    clinical = np.broadcast_to((patient.np-mean_c)/std_c,[remi.shape[0],4])
-                    return np.hstack((remi,prop,clinical))
-                case = to_case(remi,prop,patient)
-                
-
-                timepoints = 180
-                # make sequence
-                gaps = np.arange(0, 10 * (timepoints + 1), 10)
-                ppf_seq = []
-                rft_seq = []
-
-                case_p= []
-                case_r = []
-                case_c = []
-                for i,row in enumerate(case):
-                    ppf_dose = row[0]
-                    rft_dose = row[1]
-                    age = row[2]
-                    sex = row[3]
-                    wt = row[4]
-                    ht = row[5]
-                    ppf_seq.append(ppf_dose)  # make time sequence
-                    rft_seq.append(rft_dose)
-
-                    pvals = []
-                    rvals = []
-                    for j in reversed(range(timepoints)):
-                        istart = i + 1 - gaps[j + 1]
-                        iend = i + 1 - gaps[j]
-                        pvals.append(sum(ppf_seq[max(0, istart):max(0, iend)]))
-                        rvals.append(sum(rft_seq[max(0, istart):max(0, iend)]))
-
-                
-                    case_p.append(pvals)
-                    case_r.append(rvals)
-                    case_c.append([age, sex, wt, ht])
-                case_p = np.array(case_p)
-                case_r = np.array(case_r)
-                return case_p.reshape(case_p.shape[0],case_p.shape[1],1)/12, case_r.reshape(case_r.shape[0],case_r.shape[1],1)/12, np.array(case_c)
-            """
-            out = params['nnet'].predict((params['prop_input'].reshape((math.ceil(params['prop_input'].shape[0]/180),180,1)),params['remi_input'].reshape((math.ceil(params['remi_input'].shape[0]/180),180,1)),np.broadcast_to((params['patient'].np-mean_c)/std_c,[math.ceil(params['remi_input'].shape[0]/180),4])),verbose=None)
-            return out[-1]-x 
+            return (params['last_out']-x)
 
         self.nnet = load_model(path)
-        self.params = {'prop': [], 'remi': [], 'patient': patient,'nnet':self.nnet}
+        self.x0 = self.nnet((np.zeros([1,180,1]),np.zeros([1,180,1]),((patient.np-mean_c)/std_c).reshape([1,4])))
+        self.params = {'prop': [], 'remi': [], 't':-0.1,'patient': patient,'nnet':self.nnet}
         self.io = ct.NonlinearIOSystem(state_update,lambda t,x,u,params: x,params=self.params,inputs=2,states=1,outputs=1)
 
 def test():
    plt.figure()
-   plt.plot(PKPD(1,1.5,5,20)(np.array([np.sin(np.linspace(0,2*np.pi,100))+1,np.sin(np.linspace(0,3*np.pi,100))+1]))[0])
+   plt.plot(PKPD(1,1.5,5,20)(np.array([np.sin(np.linspace(0,2*np.pi,1800))+1,np.sin(np.linspace(0,3*np.pi,1800))+1]))[0])
    plt.figure()
-   plt.plot(Neural('./weights',Patient(50,170,70,Gender.F))(np.array([np.sin(np.linspace(0,2*np.pi,50))*1e-5+1e-5,np.sin(np.linspace(0,3*np.pi,50))*1e-5+1e-5]))[0])
+   plt.plot(Neural('./weights',Patient(50,170,70,Gender.F))(np.array([np.sin(np.linspace(0,2*np.pi,1800))*10+10,np.sin(np.linspace(0,3*np.pi,1800))*10+10]))[0])
    plt.figure()
-   plt.plot(Neural('./weights',Patient(50,170,70,Gender.F))(np.ones([2,50]))[0])
+   plt.plot(Neural('./weights',Patient(50,170,70,Gender.F))(np.ones([2,1800])*120)[0])
+
