@@ -48,6 +48,9 @@ class Patient:
             self.lbm = (1.1*self.weight) - (((128*self.weight)**2)/(self.height**2))
 
         self.np = np.array([self.age,float(self.gender),self.weight,self.height])
+        mean_c =np.array([ 56.50928621,0.49630326,61.13655517,162.0409402])
+        std_c =np.array([15.38680592, 0.49998633, 9.23908289, 8.33116551])
+        self.z = ((self.np-mean_c)/std_c).reshape(1,4)
     
     def __str__(self):
         return f"Age: {self.age}, Height: {self.height}, Weight: {self.weight}, Gender: {str(self.gender)}, np: {self.np}"
