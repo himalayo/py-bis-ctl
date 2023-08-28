@@ -60,7 +60,8 @@ class Neural(Predictor):
             else:
                 params['micro_prop'].append(u[0])
                 params['micro_remi'].append(u[1])
-            return params['last_out']-x
+            out = params['nnet'].predict((params['prop_input'].reshape((math.ceil(params['prop_input'].shape[0]/180),180,1)),params['remi_input'].reshape((math.ceil(params['remi_input'].shape[0]/180),180,1)),np.broadcast_to((params['patient'].np-mean_c)/std_c,[math.ceil(params['remi_input'].shape[0]/180),4])),verbose=None)
+            return out[-1]-x 
 
         self.nnet = load_model(path)
         self.x0 = self.nnet((np.zeros([1,180,1]),np.zeros([1,180,1]),((patient.np-mean_c)/std_c).reshape([1,4])))
