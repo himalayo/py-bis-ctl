@@ -34,7 +34,7 @@ class MPC:
         t = time.time()
         self.gen_cost(50,8*self.horizon)(np.ones(self.horizon*2))
         maxiter = (8)/(time.time()-t)
-        inputs = scipy.optimize.minimize(self.gen_cost(ref,8*self.horizon),np.ones(self.horizon*2),method='nelder-mead',options={'maxfev':maxiter,'fatol':40,'disp':True},bounds=[(0,60)],tol=self.horizon*8).x
+        inputs = scipy.optimize.minimize(self.gen_cost(ref,8*self.horizon),np.ones(self.horizon*2),method='nelder-mead',options={'maxfev':maxiter,'fatol':self.horizon*8,'disp':True},bounds=[(0,60)],tol=self.horizon*8).x
         return inputs[:self.horizon],inputs[self.horizon:]
 
     def gen_cost(self,ref,tol):
