@@ -1,6 +1,7 @@
 import numpy as np
 from enum import Enum
-
+mean_c =np.array([ 56.50928621,0.49630326,61.13655517,162.0409402])
+std_c =np.array([15.38680592, 0.49998633, 9.23908289, 8.33116551])
 class Gender(Enum):
     M=0
     F=1
@@ -36,6 +37,10 @@ class Gender(Enum):
     def __float__(self):
         return float(self.__int__())
 
+def from_z(zs):
+    n = (zs*std_c)+mean_c
+    return Patient(n[0],n[3],n[2],Gender.parse(n[1]))
+
 class Patient:
     def __init__(self,age: float, height: float, weight: float, gender: Gender):
         self.age = age
@@ -43,19 +48,20 @@ class Patient:
         self.weight = weight 
         self.gender = gender
         if self.gender.is_female():
-            self.lbm = (1.07*self.weight) - (((148*self.weight)**2)/(self.height**2))
+            self.lbm = (1.07*self.weight) - (148*((self.weight/self.height)**2)) 
         else: 
             self.lbm = (1.1*self.weight) - (((128*self.weight)**2)/(self.height**2))
 
         self.np = np.array([self.age,float(self.gender),self.weight,self.height])
-        mean_c =np.array([ 56.50928621,0.49630326,61.13655517,162.0409402])
-        std_c =np.array([15.38680592, 0.49998633, 9.23908289, 8.33116551])
+        
         self.z = ((self.np-mean_c)/std_c).reshape(1,4)
     
     def __str__(self):
         return f"Age: {self.age}, Height: {self.height}, Weight: {self.weight}, Gender: {str(self.gender)}, np: {self.np}"
 
+
 def test():
+    rng = np.random.default_rng()
     genders = [Gender.parse('F'),Gender.parse('f'),Gender.parse(1),Gender.parse(1.0),Gender.parse(True)]
     assert(all(genders))
     assert(Gender(not all(genders)) == Gender.M)
@@ -65,3 +71,6 @@ def test():
     assert(Gender(int(Gender.M)) == Gender.M)
     patient = Patient(50,170,80,genders[0])
     print(patient)
+    for _ in range(5):
+        print(from_z(rng.normal(size=4)))
+
