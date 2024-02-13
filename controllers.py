@@ -11,8 +11,10 @@ import pyswarms as ps
 from anesthesia_models import *
 from patient import Patient,Gender
 
-def b(a,p):
-    return tf.constant([tf.reshape(tf.concatenate((a[0,i+1:,0],p[:i+1])),[180,1]) for i in range(len(p))])
+@tf.function
+def sequential_append(a,p):
+    b = tf.reshape(a,(1,180))[0,:]
+    return tf.map_fn(lambda i: tf.reshape(tf.concat((tf.gather(tf.roll(b,-tf.cast(i,tf.int64),axis=0),tf.range(b.shape[0]-i,0,delta=-1,dtype=tf.int64)),tf.gather(p,tf.range(i,dtype=tf.int64))),0),(a.shape[1],1)),tf.range(1,p.shape[0]+1,dtype=a.dtype))
 
 class NNET:
     def __init__(self,p):
@@ -50,18 +52,18 @@ class Pharmacodynamic:
 @tf.function
 def stateless_pid(k,last_err,err_i,y,ref,rho,prop,remi,pred):
     err = ref-y
-    d = last_err-err
-    i = err_i+((last_err+err)/2)
-    action = tf.clip_by_value(tf.reshape(tf.matmul(tf.reshape([err,i,d],(1,3)),k),(1,1,1)),0,20)
-    o = pred.mdl((tf.concat((prop[:,1:,:],action),axis=1),tf.concat((remi[:,1:,:],rho*action),axis=1),pred.z))
-    return i,action,o
+    d = (err-last_err)
+    i = tf.reshape(err_i+(err*1),())
+    action = tf.clip_by_value(k[0]*(err+(1/k[1])*i+(k[2]/1)*d),0,np.inf)
+    o = pred.mdl((tf.concat((prop[:,1:,:],tf.reshape(action,(1,1,1))),axis=1),tf.concat((remi[:,1:,:],rho*tf.reshape(action,(1,1,1))),axis=1),pred.z))
+    return i,tf.reshape(action,(1,1,1)),o
 
 class PID:
     def __init__(self,mdl,p=1,i=1,d=1):
-        self.rho = 0.5
+        self.rho = 1
         self.pred = mdl
-        self.k = tf.cast(tf.reshape([p,i,d],(3,1)),dtype='float32')
-        self.err = tf.Variable(0.0)
+        self.k = tf.cast([p,i,d],dtype='float32')
+        self.err = tf.Variable(0.5-0.98)
         self.err_i = tf.Variable(0.0)
         self.prop = tf.TensorArray(tf.float32,size=180,dynamic_size=False)
         self.remi = tf.TensorArray(tf.float32,size=180,dynamic_size=False)
@@ -72,6 +74,7 @@ class PID:
 
     def update(self,ref,y):
         state = stateless_pid(self.k,self.err,self.err_i,y,ref,self.rho,tf.reshape(self.prop.stack(),(1,180,1)),tf.reshape(self.remi.stack(),(1,180,1)),self.pred)
+        print(state)
         self.err_i.assign(state[0])
         self.prop = self.prop.write(self.index,state[1][0][0][0])
         self.remi = self.remi.write(self.index,state[1][0][0][0]*self.rho)
@@ -84,40 +87,54 @@ class MPC:
     def __init__(self,patient: Patient,nnet: Model,horizon=10):
         self.horizon = horizon 
         self.patient = patient
-        self.prop = tf.zeros([1,180,1])
-        self.remi = tf.zeros([1,180,1])
+        self.prop = tf.zeros([1,180,1],dtype=tf.float64)
+        self.remi = tf.zeros([1,180,1],dtype=tf.float64)
         self.nnet = nnet
+
     def update(self,ref,x):
-        p,r = self.gen_infusion(ref,x-self.nnet.predict((self.prop,self.remi,self.patient.z),verbose=None))
-        p = tf.constant([p[0]])
-        r = tf.constant([r[0]])
-        prediction = self.predict(p,r)
-        self.prop = tf.reshape(tf.concat((self.prop[0,p.shape[0]:,0],p)),[1,180,1])
-        self.remi = tf.reshape(tf.concat((self.remi[0,r.shape[0]:,0],r)),[1,180,1])
-        return prediction 
-    
-    def predict(self,p,r):
-        prop_infusion = b(self.prop,p)
-        remi_infusion = b(self.remi,r)
-        return self.nnet.predict((prop_infusion,remi_infusion,tf.tile(self.patient.z,(p.shape[0],1))),verbose=None)
+        p,r = self.gen_infusion(ref,x-self.nnet((self.prop,self.remi,self.patient.z)))
+        self.prop = tf.reshape(tf.concat((tf.transpose(self.prop[0,:,0]),[p[0]]),axis=0)[1:],(1,180,1))
+        self.remi = tf.reshape(tf.concat((tf.transpose(self.remi[0,:,0]),[r[0]]),axis=0)[1:],(1,180,1))
+        return self.nnet((self.prop,self.remi,self.patient.z))[-1][-1]
 
     def gen_infusion(self,ref,bias):
         ref -= bias 
-        t = time.time()
-        self.gen_cost(50,8*self.horizon)(np.ones(self.horizon*2))
-        #maxiter = (8)/(time.time()-t)
         maxiter = 1e6
-        inputs = scipy.optimize.minimize(self.gen_cost(ref,8*self.horizon),np.ones(self.horizon*2),method='nelder-mead',options={'maxfev':maxiter,'fatol':self.horizon*8,'disp':True},bounds=[(0,60)],tol=self.horizon*8).x
+        loss = lambda x: stateless_cost(self.nnet,self.patient.z,self.prop,self.remi,self.horizon,x,ref)
+        j = lambda x: loss_jac(self.nnet,self.patient.z,self.prop,self.remi,self.horizon,x,ref)
+        h = lambda x: loss_hess(self.nnet,self.patient.z,self.prop,self.remi,self.horizon,x,ref)
+        inputs = scipy.optimize.minimize(loss,tf.ones(self.horizon*2),jac=j,method='L-BFGS-B',options={'disp':False}).x
         return inputs[:self.horizon],inputs[self.horizon:]
+@tf.function
+def loss_hess(nnet,z,prop,remi,horizon,x,ref):
+    x = tf.cast(x,prop.dtype)
+    a = 0.0
+    for i in range(1,horizon):
+        a += ((nnet((tf.reshape(tf.concat((prop[0,i:,0],x[:i]),axis=0),(1,180,1)),tf.reshape(tf.concat((remi[0,i:,0],x[horizon:horizon+i]),axis=0),(1,180,1)),z))[-1][-1]-ref)**2)*(100/(i+1))
+    if not tf.math.reduce_all(tf.abs(x)==x):
+        a *= 1e16     
+    return tf.gradients(tf.gradients(a,x)[0],x)[0]
 
-    def gen_cost(self,ref,tol):
-        c = lambda x:(sum((self.nnet.predict((b(self.prop,x[:self.horizon]),b(self.remi,x[self.horizon:]),np.tile(self.patient.z,(self.horizon,1))),verbose=None)-ref)**2)*100000)
-        def cost(x):
-            a=c(x)
-            return (a/(((a<tol)*1000)+1))+((tf.sqrt(sum(map(lambda y:y**2,x)))**2)*2)
-        return cost 
+@tf.function
+def loss_jac(nnet,z,prop,remi,horizon,x,ref):
+    x = tf.cast(x,prop.dtype)
+    a = 0.0
+    for i in range(1,horizon):
+        a += ((nnet((tf.reshape(tf.concat((prop[0,i:,0],x[:i]),axis=0),(1,180,1)),tf.reshape(tf.concat((remi[0,i:,0],x[horizon:horizon+i]),axis=0),(1,180,1)),z))[-1][-1]-ref)**2)*(1000/(i+1))
+    if not tf.math.reduce_all(tf.abs(x)==x):
+        a *= 1e16 
+    return tf.gradients(a,x)[0]
+@tf.function
+def stateless_cost(nnet,z,prop,remi,horizon,x,ref):
+    x = tf.cast(x,prop.dtype)
+    a = 0.0
+    for i in range(1,horizon):
+        a += ((nnet((tf.reshape(tf.concat((prop[0,i:,0],x[:i]),axis=0),(1,180,1)),tf.reshape(tf.concat((remi[0,i:,0],x[horizon:horizon+i]),axis=0),(1,180,1)),z))[-1][-1]-ref)**2)*(1000/(i+1))
+    if not tf.math.reduce_all(tf.abs(x)==x):
+        a *= 1e16 
+    return a
 
-
+   
 def lowpass(xs,dt,rc):
     a = dt/(rc+dt)
     y = [a*xs[0]]
@@ -129,18 +146,34 @@ def get_smooth(xs):
     return lowpass(xs,1,3)
 
 def get_PID(mdl,ref):
-    def iter_pid(ctl,mdl,ref):
-        ys = 0.98
-        while True:
-            ys = ctl.update(ref,ys)
-            yield ref-ys
-    def tot_err(ctl,mdl,ref,n):
-        gen = iter_pid(ctl,mdl,ref)
-        return 1e5*sum([np.abs(next(gen)) for i in range(n)])
+    @tf.function
+    def tot_err(u,ref,n):
+        last_err = 0.5-0.98
+        i = 0.0
+        y = 0.98
+        s = 0.0
+        prop = tf.TensorArray(tf.float32,size=180)
+        prop.unstack(tf.zeros((180)))
+        remi = tf.TensorArray(tf.float32,size=180)
+        remi.unstack(tf.zeros((180)))
+        for j in range(n):
+            state = stateless_pid(u,last_err,i,y,ref,0.1,tf.reshape(prop.stack(),(1,180,1)),tf.reshape(remi.stack(),(1,180,1)),mdl)
+            prop = prop.write(j,state[1][0][0][0])
+            remi = remi.write(j,state[1][0][0][0]*0.1)
+            last_err = ref-state[2][0][0]
+            y = state[2][0][0]
+            i = state[0]
+            s += tf.abs(last_err)
+        return 1e5*s
+    @tf.function
     def cost(x):
-        c = PID(mdl.patient,mdl,x[0],x[1],x[1],0.5)
-        return tot_err(c,mdl,ref,70)
-    return scipy.optimize.minimize(cost,np.array([-1,0,0]),options={'maxiter':40,'eps':1e-6,'disp':False})
+        return tot_err(tf.cast(x,tf.float32),tf.cast(ref,tf.float32),tf.constant(90))
+    @tf.function
+    def j(x):
+        a = tf.cast(x,tf.float32)
+        return tf.gradients(tot_err(a,0.5,40),a)
+    print(j(tf.constant([-1,0,0])))
+    return scipy.optimize.minimize(cost,np.array([-1,0,0]),jac=j,options={'maxiter':100,'disp':True}).x
 
 def swarm_PID(mdl,ref):
     @tf.function
@@ -153,10 +186,10 @@ def swarm_PID(mdl,ref):
         prop.unstack(tf.zeros((180)))
         remi = tf.TensorArray(tf.float32,size=180)
         remi.unstack(tf.zeros((180)))
-        for j in range(n):
-            state = stateless_pid(u,last_err,i,y,ref,0.5,tf.reshape(prop.stack(),(1,180,1)),tf.reshape(remi.stack(),(1,180,1)),mdl)
+        for j in range(1,n):
+            state = stateless_pid(u,last_err,i,y,ref,2.0,tf.reshape(prop.stack(),(1,180,1)),tf.reshape(remi.stack(),(1,180,1)),mdl)
             prop = prop.write(j,state[1][0][0][0])
-            remi = remi.write(j,state[1][0][0][0]*0.5)
+            remi = remi.write(j,state[1][0][0][0]*2)
             last_err = ref-state[2][0][0]
             y = state[2][0][0]
             i = state[0]
@@ -166,9 +199,9 @@ def swarm_PID(mdl,ref):
     def cost(y):
         return tf.vectorized_map(lambda x: tot_err(tf.reshape([x[0],x[1],x[2]],(3,1)),tf.constant(0.5,tf.float32),tf.constant(70)),tf.cast(y,tf.float32))
     print(cost(tf.constant([[1.0,1.0,1.0]])))
-    options = {'c1':0.5, 'c2':0.3, 'w':0.9}
+    options = {'c1':5, 'c2':3, 'w':9}
     optimizer = ps.single.GlobalBestPSO(n_particles=5000, dimensions=3, options=options)
-    return optimizer.optimize(cost,iters=1000)[1]
+    return optimizer.optimize(cost,iters=50)[1]
     
 def PID_plot(mdl):
     def iter_pid(ctl):
@@ -191,10 +224,12 @@ def PID_plot(mdl):
     return xs,ys,zs
 
 def test():
-    p = Patient(56,160,60,Gender.F)
+    p = Patient(36,160,60,Gender.F)
     #n = Pharmacodynamic(p,2.0321,2.3266,13.9395,26.6474) 
     n = NNET(p)
-    #mpc = MPC(p,n.mdl,5)
+    refs = (tf.ones(15)*0.5)
+
+    c = MPC(p,n.mdl,5)
     #x = n(np.zeros((1,180,1)),np.zeros((1,180,1)))
     #ys = [x]
     #for i in range(50):
@@ -206,192 +241,26 @@ def test():
     #c = PID(p,n,*pid)
     #fig,ax = plt.subplots(subplot_kw=dict(projection='3d'))
     #ax.plot_surface(*PID_plot(n))
-    optimized_values = swarm_PID(n,0.5)
-    c = PID(n,*optimized_values)
+    #optimized_values = swarm_PID(n,0.5)
+    #optimized_values =get_PID(n,0.5)
+    #optimized_values =[-10,np.inf,0]
+    #c = PID(n,*optimized_values)
     #c = PID(p,n,-1.55470255,0, -0.00467335)
-    print(time.time()-st,c.k)
-    bis = [n(np.ones([1,180,1])*1e-16,np.ones([1,180,1])*1e-16)]*50
+    #print(time.time()-st,c.k)
+    bis = [n(tf.ones([1,180,1])*1e-16,tf.ones([1,180,1])*1e-16)]*50
     #print(bis)
     true_bis = []
     rs = []
     at = time.time()
-    refs = (tf.ones(15)*0.5)
     for a,r in enumerate(refs):
         for i in range(10):
             st = time.time()
             b = c.update(r,bis[-1])
+            print(b,c.prop[0,-1,0],c.remi[0,-1,0])
             #bis.extend(b+(int(a>len(refs[int(len(refs)/2):])/2))*0.2+np.random.normal(scale=0.05))
             bis.append(b)
             rs.extend([r])
     plt.figure()
     plt.plot(bis[50:])
-    print(c.prop.stack())
-    """
-    p = Patient(30,180,60,Gender.F)
-    nnet = load_model('./weights')
-    mpc = MPC(p,nnet,5)
-    bis = list(nnet.predict((np.zeros([1,180,1]),np.zeros([1,180,1]),p.z)))*50
-    smoothed_bis = get_smooth(bis)
-    true_bis = []
-    print(smoothed_bis)
-    rs = []
-    at = time.time()
-    refs = np.concatenate((np.ones(5)*0.5,np.ones(5)*0.7))
-    for a,r in enumerate(refs[:int(len(refs)/2)]):
-        for i in range(10):
-            st = time.time()
-            b = mpc.update(r,smoothed_bis[-1])
-            #bis.extend(b+(int(a>len(refs[int(len(refs)/2):])/2))*0.2+np.random.normal(scale=0.05))
-            bis.extend(b+np.random.normal(scale=0.05))
-            smoothed_bis = get_smooth(bis)
-            #true_bis.extend(b+(int(a>len(refs[int(len(refs)/2):])/2))*0.2)
-            true_bis.extend(b)
-            rs.extend([r]*len(b))
-            print(smoothed_bis[-1],bis[-1],time.time()-st)
-    for a,r in enumerate(refs[int(len(refs)/2):]):
-        for i in range(10):
-            st = time.time()
-            b = mpc.update(r,smoothed_bis[-1])
-            #bis.extend(b+(int(a>len(refs[int(len(refs)/2):])/2))*0.2+np.random.normal(scale=0.05))
-            bis.extend(b+np.random.normal(scale=0.05))
-            smoothed_bis = get_smooth(bis)
-            #true_bis.extend(b+(int(a>len(refs[int(len(refs)/2):])/2))*0.2)
-            true_bis.extend(b)
-            rs.extend([r]*len(b))
-            print(smoothed_bis[-1],bis[-1],time.time()-st)
-
     print(time.time()-at)
-    plt.figure()
-    plt.title("Com low-pass")
-    #plt.plot(list(map(lambda x:x*100,smoothed_bis[50:])),label="Simulated BIS (smoothed)")
-    plt.plot(list(map(lambda x:x*100,bis[50:])),label="Simulated BIS (noisy)")
-    plt.plot(list(map(lambda x:x*100,true_bis)),label="Simulated BIS (true)")
-    plt.plot(list(map(lambda x:x*100,rs)),label="Reference")
-    plt.xlabel("Time (10s)")
-    plt.ylabel("BIS")
-    plt.legend()
-    plt.figure()
-    plt.title("Com low-pass")
-    #plt.plot(list(map(lambda x:x*100,smoothed_bis[50:])),label="Simulated BIS (smoothed)")
-    plt.plot(list(map(lambda x:x*100,bis[50:])),label="Simulated BIS (noisy)")
-    #plt.plot(list(map(lambda x:x*100,true_bis)),label="Simulated BIS (true)")
-    plt.plot(list(map(lambda x:x*100,rs)),label="Reference")
-    plt.xlabel("Time (10s)")
-    plt.ylabel("BIS")
-    plt.figure()
-    plt.title("Erro do lowpass")
-    plt.plot(np.array(true_bis)-np.array(smoothed_bis[50:]),label="filter error")
-    plt.legend()
-    plt.legend()
-    plt.ylim(bottom=0)lt.ylim(bottom=0)
-    plt.figure()
-    plt.plot(mpc.prop[0,180-len(bis)-50:,0])
-    plt.xlabel("Time (10s)")
-    plt.ylabel("Propofol dose (ug)")
-    plt.figure()
-    plt.plot(mpc.remi[0,180-len(bis)-50:,0])
-    plt.xlabel("Time (10s)")
-    plt.ylabel("Remifentanil dose (ng)")
-    p = Patient(30,180,60,Gender.F)
-    nnet = load_model('./weights')
-    mpc = MPC(p,nnet,5)
-    bis = list(nnet.predict((np.zeros([1,180,1]),np.zeros([1,180,1]),p.z)))*50
-    smoothed_bis = get_smooth(bis)
-    true_bis = [bis[-1]]
-    print(smoothed_bis)
-    rs = []
-    at = time.time()
-    refs = np.concatenate((np.ones(5)*0.5,np.ones(5)*0.7))
-    for a,r in enumerate(refs[:int(len(refs)/2)]):
-        for i in range(10):
-            st = time.time()
-            b = mpc.update(r,true_bis[-1])
-            #bis.extend(b+(int(a>len(refs[int(len(refs)/2):])/2))*0.2+np.random.normal(scale=0.05))
-            bis.extend(b+np.random.normal(scale=0.05))
-            smoothed_bis = get_smooth(bis)
-            #true_bis.extend(b+(int(a>len(refs[int(len(refs)/2):])/2))*0.2)
-            true_bis.extend(b)
-            rs.extend([r]*len(b))
-            print(smoothed_bis[-1],bis[-1],time.time()-st)
-    for a,r in enumerate(refs[int(len(refs)/2):]):
-        for i in range(10):
-            st = time.time()
-            b = mpc.update(r,true_bis[-1])
-            #bis.extend(b+(int(a>len(refs[int(len(refs)/2):])/2))*0.2+np.random.normal(scale=0.05))
-            bis.extend(b+np.random.normal(scale=0.05))
-            smoothed_bis = get_smooth(bis)
-            #true_bis.extend(b+(int(a>len(refs[int(len(refs)/2):])/2))*0.2)
-            true_bis.extend(b)
-            rs.extend([r]*len(b))
-            print(smoothed_bis[-1],bis[-1],time.time()-st)
-    print(time.time()-at)
-    plt.figure()
-    plt.title("Filtro perfeito")
-    #plt.plot(list(map(lambda x:x*100,smoothed_bis[50:])),label="Simulated BIS (smoothed)")
-    plt.plot(list(map(lambda x:x*100,bis[50:])),label="Simulated BIS (noisy)")
-    plt.plot(list(map(lambda x:x*100,true_bis)),label="Simulated BIS (true)")
-    plt.plot(list(map(lambda x:x*100,rs)),label="Reference")
-    plt.xlabel("Time (10s)")
-    plt.ylabel("BIS")
-    plt.legend()
-    plt.figure()
-    plt.title("Filtro perfeito")
-    #plt.plot(list(map(lambda x:x*100,smoothed_bis[50:])),label="Simulated BIS (smoothed)")
-    plt.plot(list(map(lambda x:x*100,bis[50:])),label="Simulated BIS (noisy)")
-    #plt.plot(list(map(lambda x:x*100,true_bis)),label="Simulated BIS (true)")
-    plt.plot(list(map(lambda x:x*100,rs)),label="Reference")
-    plt.xlabel("Time (10s)")
-    plt.ylabel("BIS")
-
-    p = Patient(30,180,60,Gender.F)
-    nnet = load_model('./weights')
-    mpc = MPC(p,nnet,5)
-    bis = list(nnet.predict((np.zeros([1,180,1]),np.zeros([1,180,1]),p.z)))*50
-    smoothed_bis = get_smooth(bis)
-    true_bis = []
-    print(smoothed_bis)
-    rs = []
-    at = time.time()
-    refs = np.concatenate((np.ones(5)*0.5,np.ones(5)*0.7))
-    for a,r in enumerate(refs[:int(len(refs)/2)]):
-        for i in range(10):
-            st = time.time()
-            b = mpc.update(r,bis[-1])
-            #bis.extend(b+(int(a>len(refs[int(len(refs)/2):])/2))*0.2+np.random.normal(scale=0.05))
-            bis.extend(b+np.random.normal(scale=0.05))
-            smoothed_bis = get_smooth(bis)
-            #true_bis.extend(b+(int(a>len(refs[int(len(refs)/2):])/2))*0.2)
-            true_bis.extend(b)
-            rs.extend([r]*len(b))
-            print(smoothed_bis[-1],bis[-1],time.time()-st)
-    for a,r in enumerate(refs[int(len(refs)/2):]):
-        for i in range(10):
-            st = time.time()
-            b = mpc.update(r,bis[-1])
-            #bis.extend(b+(int(a>len(refs[int(len(refs)/2):])/2))*0.2+np.random.normal(scale=0.05))
-            bis.extend(b+np.random.normal(scale=0.05))
-            smoothed_bis = get_smooth(bis)
-            #true_bis.extend(b+(int(a>len(refs[int(len(refs)/2):])/2))*0.2)
-            true_bis.extend(b)
-            rs.extend([r]*len(b))
-            print(smoothed_bis[-1],bis[-1],time.time()-st)
-    print(time.time()-at)
-    plt.figure()
-    plt.title("Sem filtro")
-    #plt.plot(list(map(lambda x:x*100,smoothed_bis[50:])),label="Simulated BIS (smoothed)")
-    plt.plot(list(map(lambda x:x*100,bis[50:])),label="Simulated BIS (noisy)")
-    #plt.plot(list(map(lambda x:x*100,true_bis)),label="Simulated BIS (true)")
-    plt.plot(list(map(lambda x:x*100,rs)),label="Reference")
-    plt.xlabel("Time (10s)")
-    plt.ylabel("BIS")
-    plt.legend()
-    plt.figure()
-    plt.title("Sem filtro")
-    #plt.plot(list(map(lambda x:x*100,smoothed_bis[50:])),label="Simulated BIS (smoothed)")
-    plt.plot(list(map(lambda x:x*100,bis[50:])),label="Simulated BIS (noisy)")
-    plt.plot(list(map(lambda x:x*100,true_bis)),label="Simulated BIS (true)")
-    plt.plot(list(map(lambda x:x*100,rs)),label="Reference")
-    plt.xlabel("Time (10s)")
-    plt.ylabel("BIS")
-    plt.legend()
-    """
+    #print(c.prop.stack())
