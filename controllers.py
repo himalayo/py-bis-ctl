@@ -140,7 +140,7 @@ def get_smooth(xs):
 def get_PID(pred,ref,x0=tf.constant([-1.55,0,0.4])):
     @tf.function
     def gradient(kp,ki,kd,rho):
-        f = loss(kp,ki,kd,rho,tf.constant(0.5),tf.constant(140),pred)
+        f = pid_loss(kp,ki,kd,rho,tf.constant(0.5),tf.constant(140),pred)
         grad = tf.gradients(f,[kp,ki,kd])
         tf.print([kp,ki,kd,rho],f,grad)
         return grad 
@@ -149,7 +149,7 @@ def get_PID(pred,ref,x0=tf.constant([-1.55,0,0.4])):
 def swarm_PID(pred,ref):
     @tf.function
     def cost(y):
-        return tf.vectorized_map(lambda x: pid_loss(x[0],x[1],x[2],1,tf.constant(0.5,tf.float32),140,pred),tf.cast(y,tf.float32))
+        return tf.vectorized_map(lambda x: pid_loss(x[0],x[1],x[2],tf.constant(1,tf.float32),tf.constant(0.5,tf.float32),tf.constant(140),pred),tf.cast(y,tf.float32))
     options = {'c1':0.05, 'c2':0.03, 'w':0.09}
     optimizer = ps.single.GlobalBestPSO(n_particles=700, dimensions=3, options=options)
     return optimizer.optimize(cost,iters=50)[1]
@@ -204,7 +204,7 @@ def test():
     #pid_loss_plot(n,0.0)
     refs = (tf.ones(15)*0.5)
 
-    c = MPC(p,n.mdl,5)
+    #c = MPC(p,n.mdl,5)
     #x = n(np.zeros((1,180,1)),np.zeros((1,180,1)))
     #ys = [x]
     #for i in range(50):
@@ -217,10 +217,10 @@ def test():
     #fig,ax = plt.subplots(subplot_kw=dict(projection='3d'))
     #ax.plot_surface(*PID_plot(n))
     #optimized_values = swarm_PID(n,0.5)
-    #optimized_values =get_PID(n,0.5,swarm_PID(n,0.5))
-    #print(time.time()-st)
+    optimized_values =get_PID(n,0.5)
+    print(time.time()-st)
     #optimized_values =[-10,np.inf,0]
-    #c = PID(n,*optimized_values)
+    c = PID(n,*optimized_values)
     #c = PID(n,-3,-0.003,3)
     #print(time.time()-st,c.k)
     bis = [n(tf.ones([1,180,1])*1e-16,tf.ones([1,180,1])*1e-16)]*50
