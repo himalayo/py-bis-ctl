@@ -150,9 +150,9 @@ def swarm_PID(pred,ref):
     @tf.function
     def cost(y):
         return tf.vectorized_map(lambda x: pid_loss(x[0],x[1],x[2],tf.constant(1,tf.float32),tf.constant(0.5,tf.float32),tf.constant(140),pred),tf.cast(y,tf.float32))
-    options = {'c1':0.05, 'c2':0.03, 'w':0.09}
+    options = {'c1':0.5, 'c2':0.3, 'w':-0.9}
     optimizer = ps.single.GlobalBestPSO(n_particles=700, dimensions=3, options=options)
-    return optimizer.optimize(cost,iters=50)[1]
+    return optimizer.optimize(cost,iters=35)[1]
 
 @tf.function
 def pid_loss(kp,ki,kd,rho,ref,n,pred):
@@ -180,6 +180,8 @@ def pid_loss(kp,ki,kd,rho,ref,n,pred):
             remi = tf.concat((remi[:,1:,:],[[[ru]]]),axis=1)
             y = pred.mdl((prop,remi,pred.patient.z))[-1][-1]
             s += (last_err*10)**2
+            if j>30 and tf.abs(err)>=0.01:
+                s += 50
         return s   
 
 def pid_loss_plot(pred,i):
@@ -216,8 +218,9 @@ def test():
     #c = PID(p,n,*pid)
     #fig,ax = plt.subplots(subplot_kw=dict(projection='3d'))
     #ax.plot_surface(*PID_plot(n))
-    #optimized_values = swarm_PID(n,0.5)
-    optimized_values =get_PID(n,0.5)
+    optimized_values = swarm_PID(n,0.5)
+    #optimized_values =get_PID(n,0.5)
+    #optimized_values =get_PID(n,0.5,swarm_PID(n,0.5))
     print(time.time()-st)
     #optimized_values =[-10,np.inf,0]
     c = PID(n,*optimized_values)
@@ -237,5 +240,6 @@ def test():
             rs.extend([r])
     plt.figure()
     plt.plot(bis[50:])
+    plt.plot(rs)
     print(time.time()-at)
     #print(c.prop.stack())
