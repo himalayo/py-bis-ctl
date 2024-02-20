@@ -6,7 +6,7 @@ import sys
 import statsmodels.api as sm
 from keras.models import Model, load_model
 import matplotlib.pyplot as plt
-import pyswarms as ps
+import pso
 
 from anesthesia_models import *
 from patient import Patient,Gender
@@ -146,43 +146,47 @@ def get_PID(pred,ref,x0=tf.constant([-1.55,0,0.4])):
         return grad 
     return scipy.optimize.minimize(lambda x: tf.cast(pid_loss(*tf.cast(x,tf.float32),tf.constant(1.0),tf.constant(0.5),tf.constant(140),pred),tf.float64),x0,jac=lambda x: tf.cast(gradient(*tf.cast(x,tf.float32),1),tf.float64),method='L-BFGS-B',options={'disp':True}).x
 
-def swarm_PID(pred,ref):
-    @tf.function
-    def cost(y):
-        return tf.vectorized_map(lambda x: pid_loss(x[0],x[1],x[2],tf.constant(1,tf.float32),tf.constant(0.5,tf.float32),tf.constant(140),pred),tf.cast(y,tf.float32))
-    options = {'c1':0.5, 'c2':0.3, 'w':-0.9}
-    optimizer = ps.single.GlobalBestPSO(n_particles=700, dimensions=3, options=options)
-    return optimizer.optimize(cost,iters=35)[1]
+def gd_PID(pred,ref,x0=tf.constant([-1.5,0,0.4])):
+    p = tf.Variable(x0[0])
+    i = tf.Variable(x0[1])
+    d = tf.Variable(x0[2])
+    opt = tf.keras.optimizers.Lion(0.01)
+    for _ in range(100):
+        opt.minimize(lambda: pid_loss(p,i,d,1,0.5,70,pred),[p,i,d])
+    return p,i,d
 
 @tf.function
-def pid_loss(kp,ki,kd,rho,ref,n,pred):
-        last_err = 0.5-0.98
-        i = 0.0
-        y = 0.98
-        s = 0.0
-        prop = tf.zeros((1,180,1))
-        remi = tf.zeros((1,180,1))
-        for j in range(n):
-            err = ref-y
-            i += (err+last_err)/2
-            pu = kp*err+ki*i+kd*(err-last_err)
-            ru = rho*(kp*err+ki*i+kd*(err-last_err))
-            if pu<0:
-                pu = tf.constant(0.0,pu.dtype)
-            if pu>40:
-                pu = tf.constant(40.0,pu.dtype)
-            if ru<0:
-                ru = tf.constant(0.0,ru.dtype)
-            if ru>40:
-                ru = tf.constant(40.0,ru.dtype)
-            last_err = err 
-            prop = tf.concat((prop[:,1:,:],[[[pu]]]),axis=1)
-            remi = tf.concat((remi[:,1:,:],[[[ru]]]),axis=1)
-            y = pred.mdl((prop,remi,pred.patient.z))[-1][-1]
-            s += (last_err*10)**2
-            if j>30 and tf.abs(err)>=0.01:
-                s += 50
-        return s   
+def swarm_PID(pred,ref,z):
+    #options = {'c1':0.5, 'c2':0.3, 'w':-0.9}
+    #optimizer = ps.single.GlobalBestPSO(n_particles=1100, dimensions=3, options=options)
+    return pso.optimize(vectorized_cost,pop_size=1100,b=-0.04,x_min=-2,x_max=0,dim=3,n_iter=75,pred=pred,z=z)
+
+@tf.function
+def vectorized_cost(y,pred=None,z=None):
+    return pid_loss(y[:,0],y[:,1],y[:,2],1,tf.transpose(tf.repeat(0.5,y.shape[0])),140,pred,tf.repeat(z,y.shape[0],0))
+
+@tf.function
+def pid_loss(kp,ki,kd,rho,ref,n,mdl,z):
+    last_err = [0.5-0.98]*kp.shape[0]
+    i = [0.0]*kp.shape[0]
+    y = [0.98]*kp.shape[0]
+    s = [0.0]*kp.shape[0]
+    prop = tf.zeros((kp.shape[0],180,1))
+    remi = tf.zeros((kp.shape[0],180,1))
+    for j in range(n):
+        err = ref-y
+        i += (err+last_err)/2
+        pu = tf.clip_by_value(kp*err+ki*i+kd*(err-last_err),0,40)
+        ru = tf.clip_by_value(rho*(kp*err+ki*i+kd*(err-last_err)),0,40)
+
+        last_err = err 
+        prop = tf.concat((prop[:,1:,:],tf.reshape(pu,(pu.shape[0],1,1))),axis=1)
+        remi = tf.concat((remi[:,1:,:],tf.reshape(ru,(ru.shape[0],1,1))),axis=1)
+        y = tf.reshape(mdl((prop,remi,z)),kp.shape)
+        s += (last_err*10)**2
+        if j>30:
+            s = tf.where(tf.abs(err)>=0.01,s+50,s) 
+    return s   
 
 def pid_loss_plot(pred,i):
     p = tf.cast(tf.linspace(-3,3,100),tf.float32)
@@ -199,12 +203,49 @@ def pid_loss_plot(pred,i):
     fig, ax = plt.subplots(subplot_kw={"projection": "3d"})
     ax.plot_surface(P,D,z.stack())
 
+
+@tf.function
+def run_pid(kp,ki,kd,ref,n,mdl,z,rho=1):
+    kp=tf.cast(kp,tf.float32)
+    ki=tf.cast(ki,tf.float32)
+    kd=tf.cast(kd,tf.float32)
+    last_err = 0.5-0.98
+    i = 0.0
+    y = 0.98
+    ys = tf.TensorArray(tf.float32,size=n)
+    rus = tf.TensorArray(tf.float32,size=n)
+    pus = tf.TensorArray(tf.float32,size=n)
+    prop = tf.zeros((1,180,1))
+    remi = tf.zeros((1,180,1))
+    for j in tf.range(n):
+        err = ref-y
+        i += (err+last_err)/2
+        pu = tf.clip_by_value(kp*err+ki*i+kd*(err-last_err),0,40)
+        ru = tf.clip_by_value(rho*(kp*err+ki*i+kd*(err-last_err)),0,40)
+        last_err = err 
+        prop = tf.concat((prop[:,1:,:],[[[pu]]]),axis=1)
+        remi = tf.concat((remi[:,1:,:],[[[ru]]]),axis=1)
+        y = mdl((prop,remi,z))[-1][-1]
+        ys = ys.write(j,y)
+        pus = pus.write(j,pu)
+        rus = rus.write(j,ru)
+    return tf.stack((ys.stack(),pus.stack(),rus.stack()))
+
+
+def run_controller(c,ref,n):
+    bis = [c.pred.mdl((tf.zeros((1,180,1)),tf.zeros((1,180,1)),c.pred.patient.z))[-1][-1]]
+    refs = (tf.ones(n)*0.5)
+    for a,r in enumerate(refs):
+        b = c.update(r,bis[-1])
+        bis.append(b)
+    return bis
+
 def test():
     p = Patient(36,160,60,Gender.F)
     #n = Pharmacodynamic(p,2.0321,2.3266,13.9395,26.6474) 
     n = NNET(p)
     #pid_loss_plot(n,0.0)
-    refs = (tf.ones(15)*0.5)
+    refs = (tf.ones(60)*0.5)
 
     #c = MPC(p,n.mdl,5)
     #x = n(np.zeros((1,180,1)),np.zeros((1,180,1)))
@@ -213,33 +254,39 @@ def test():
     #    x = mpc.update(0.5,x)[-1][-1]
     #    ys.append(x)
     #    print(ys)
-    st = time.time() 
+    #st = time.time() 
     #pid,_ = fit_PID(n,0.5,ys)
     #c = PID(p,n,*pid)
     #fig,ax = plt.subplots(subplot_kw=dict(projection='3d'))
     #ax.plot_surface(*PID_plot(n))
-    optimized_values = swarm_PID(n,0.5)
+    #optimized_values = swarm_PID(n,0.5)
     #optimized_values =get_PID(n,0.5)
+    #optimized_values = gd_PID(n,0.5)
     #optimized_values =get_PID(n,0.5,swarm_PID(n,0.5))
-    print(time.time()-st)
     #optimized_values =[-10,np.inf,0]
-    c = PID(n,*optimized_values)
+    #c = PID(n,*optimized_values)
     #c = PID(n,-3,-0.003,3)
     #print(time.time()-st,c.k)
-    bis = [n(tf.ones([1,180,1])*1e-16,tf.ones([1,180,1])*1e-16)]*50
     #print(bis)
-    true_bis = []
-    rs = []
-    at = time.time()
-    for a,r in enumerate(refs):
-        for i in range(10):
-            st = time.time()
-            b = c.update(r,bis[-1])
-            #bis.extend(b+(int(a>len(refs[int(len(refs)/2):])/2))*0.2+np.random.normal(scale=0.05))
-            bis.append(b)
-            rs.extend([r])
     plt.figure()
-    plt.plot(bis[50:])
-    plt.plot(rs)
+    plt.title("PSO")
+    at = time.time() 
+    #k = swarm_PID(tf.function(n.mdl),0.5,n.z)
+    k = [-0.529349208,-1.43406987,2]
+    plt.plot(run_controller(PID(n,k[0],k[1],k[2]),0.5,6000))
     print(time.time()-at)
+    """
+    plt.figure()
+    plt.title("L-BFGS")
+    at = time.time() 
+    plt.plot(run_controller(PID(n,*get_PID(n,0.5)),0.5,600))
+    print(time.time()-at)
+    plt.plot([0.5]*600)
+    plt.figure()
+    plt.title("PSO+L-BFGS")
+    at = time.time() 
+    plt.plot(run_controller(PID(n,*get_PID(n,0.5,swarm_PID(n,0.5))),0.5,600))
+    print(time.time()-at)
+    plt.plot([0.5]*600)
     #print(c.prop.stack())
+    """
