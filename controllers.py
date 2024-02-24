@@ -1,4 +1,5 @@
 import tensorflow as tf
+import data_generator
 import math
 import time
 import scipy
@@ -81,20 +82,20 @@ class MPC:
         self.patient = patient
         self.prop = tf.zeros([1,180,1],dtype=tf.float64)
         self.remi = tf.zeros([1,180,1],dtype=tf.float64)
-        self.nnet = nnet
+        self.pred = nnet
 
     def update(self,ref,x):
-        p,r = self.gen_infusion(ref,x-self.nnet((self.prop,self.remi,self.patient.z)))
+        p,r = self.gen_infusion(ref,x-self.pred((self.prop,self.remi,self.patient.z)))
         self.prop = tf.reshape(tf.concat((tf.transpose(self.prop[0,:,0]),[p[0]]),axis=0)[1:],(1,180,1))
         self.remi = tf.reshape(tf.concat((tf.transpose(self.remi[0,:,0]),[r[0]]),axis=0)[1:],(1,180,1))
-        return self.nnet((self.prop,self.remi,self.patient.z))[-1][-1]
+        return self.pred((self.prop,self.remi,self.patient.z))[-1][-1]
 
     def gen_infusion(self,ref,bias):
         ref -= bias 
         maxiter = 1e6
-        loss = lambda x: mpc_loss(self.nnet,self.patient.z,self.prop,self.remi,self.horizon,x,ref)
-        j = lambda x: mpc_loss_jac(self.nnet,self.patient.z,self.prop,self.remi,self.horizon,x,ref)
-        h = lambda x: mpc_loss_hess(self.nnet,self.patient.z,self.prop,self.remi,self.horizon,x,ref)
+        loss = lambda x: mpc_loss(self.pred,self.patient.z,self.prop,self.remi,self.horizon,x,ref)
+        j = lambda x: mpc_loss_jac(self.pred,self.patient.z,self.prop,self.remi,self.horizon,x,ref)
+        h = lambda x: mpc_loss_hess(self.pred,self.patient.z,self.prop,self.remi,self.horizon,x,ref)
         inputs = scipy.optimize.minimize(loss,tf.ones(self.horizon*2),jac=j,method='L-BFGS-B',options={'disp':False}).x
         return inputs[:self.horizon],inputs[self.horizon:]
 @tf.function
@@ -159,7 +160,7 @@ def gd_PID(pred,ref,x0=tf.constant([-1.5,0,0.4])):
 def swarm_PID(pred,ref,z):
     #options = {'c1':0.5, 'c2':0.3, 'w':-0.9}
     #optimizer = ps.single.GlobalBestPSO(n_particles=1100, dimensions=3, options=options)
-    return pso.optimize(vectorized_cost,pop_size=1100,b=-0.04,x_min=-2,x_max=0,dim=3,n_iter=75,pred=pred,z=z)
+    return pso.optimize(vectorized_cost,pop_size=300,b=0.7,x_min=-4,x_max=4,dim=3,pred=pred,z=z)
 
 @tf.function
 def vectorized_cost(y,pred=None,z=None):
@@ -205,19 +206,20 @@ def pid_loss_plot(pred,i):
 
 
 @tf.function
-def run_pid(kp,ki,kd,ref,n,mdl,z,rho=1):
+def run_pid(kp,ki,kd,refs,mdl,z,rho=1):
+    j = 0
     kp=tf.cast(kp,tf.float32)
     ki=tf.cast(ki,tf.float32)
     kd=tf.cast(kd,tf.float32)
-    last_err = 0.5-0.98
+    last_err = refs[0]-0.98
     i = 0.0
     y = 0.98
-    ys = tf.TensorArray(tf.float32,size=n)
-    rus = tf.TensorArray(tf.float32,size=n)
-    pus = tf.TensorArray(tf.float32,size=n)
+    ys = tf.TensorArray(tf.float32,size=refs.shape[0])
+    rus = tf.TensorArray(tf.float32,size=refs.shape[0])
+    pus = tf.TensorArray(tf.float32,size=refs.shape[0])
     prop = tf.zeros((1,180,1))
     remi = tf.zeros((1,180,1))
-    for j in tf.range(n):
+    for ref in refs:
         err = ref-y
         i += (err+last_err)/2
         pu = tf.clip_by_value(kp*err+ki*i+kd*(err-last_err),0,40)
@@ -229,13 +231,12 @@ def run_pid(kp,ki,kd,ref,n,mdl,z,rho=1):
         ys = ys.write(j,y)
         pus = pus.write(j,pu)
         rus = rus.write(j,ru)
+        j += 1
     return tf.stack((ys.stack(),pus.stack(),rus.stack()))
 
-
-def run_controller(c,ref,n):
-    bis = [c.pred.mdl((tf.zeros((1,180,1)),tf.zeros((1,180,1)),c.pred.patient.z))[-1][-1]]
-    refs = (tf.ones(n)*0.5)
-    for a,r in enumerate(refs):
+def run_controller(c,rfs):
+    bis = [c.pred((tf.zeros((1,180,1)),tf.zeros((1,180,1)),c.patient.z))[-1][-1]]
+    for r in rfs:
         b = c.update(r,bis[-1])
         bis.append(b)
     return bis
@@ -245,9 +246,8 @@ def test():
     #n = Pharmacodynamic(p,2.0321,2.3266,13.9395,26.6474) 
     n = NNET(p)
     #pid_loss_plot(n,0.0)
-    refs = (tf.ones(60)*0.5)
 
-    #c = MPC(p,n.mdl,5)
+    c = MPC(p,n.mdl,5)
     #x = n(np.zeros((1,180,1)),np.zeros((1,180,1)))
     #ys = [x]
     #for i in range(50):
@@ -268,13 +268,21 @@ def test():
     #c = PID(n,-3,-0.003,3)
     #print(time.time()-st,c.k)
     #print(bis)
+    refs = data_generator.rfs 
+    plt.figure()
+    plt.plot(run_controller(c,refs))
+    """
     plt.figure()
     plt.title("PSO")
     at = time.time() 
-    #k = swarm_PID(tf.function(n.mdl),0.5,n.z)
-    k = [-0.529349208,-1.43406987,2]
-    plt.plot(run_controller(PID(n,k[0],k[1],k[2]),0.5,6000))
+    k = swarm_PID(tf.function(n.mdl),0.5,n.z)
+    data = run_pid(k[0],k[1],k[2],refs,n.mdl,p.z)
+    plt.plot(data[0])
+    plt.plot(refs)
+    plt.figure()
+    plt.plot(data[1])
     print(time.time()-at)
+    """
     """
     plt.figure()
     plt.title("L-BFGS")
