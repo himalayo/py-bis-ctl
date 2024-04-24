@@ -3,14 +3,17 @@ import data_generator
 import math
 import time
 import scipy
+import tensorflow_probability as tfp
 import sys
 import statsmodels.api as sm
-from keras.models import Model, load_model
 import matplotlib.pyplot as plt
+import keras
+from keras.models import Model, Sequential
 import pso
 
 from anesthesia_models import *
 from patient import Patient,Gender
+
 
 @tf.function
 def sequential_append(a,p):
@@ -20,12 +23,15 @@ def sequential_append(a,p):
 class NNET:
     def __init__(self,p):
         self.z = p.z
-        self.mdl = load_model('./weights/')
+        self.saved_model = tf.saved_model.load('./weights')
+        self.mdl = tf.function(self.saved_model.signatures['serving_default'])
         self.patient = p
+        self.p = 0
+        self.r = 0
 
     @tf.function
-    def __call__(self,p,r):
-        return self.mdl((p,r,self.z))[-1][-1]
+    def __call__(self,inputs):
+        return self.mdl(input_1=inputs[2],input_2=inputs[1],input_3=inputs[0])['dense_1']
 
 class Pharmacodynamic:
     def __init__(self,patient,beta,gamma,cp50,cr50):
@@ -58,46 +64,82 @@ def stateless_pid(k,l_e,e_i,y,ref):
     action = tf.tensordot([e,i,d],k,1)
     return action
 
-class PID:
+class PID(tf.Module):
     def __init__(self,mdl,p=1,i=1,d=1,rho=1):
         self.rho =rho 
         self.pred = mdl
-        self.k = tf.cast([p,i,d],dtype='float32')
+        self.k = tf.Variable(tf.cast([p,i,d],dtype='float32'))
         self.err = tf.Variable(0.5-0.98)
         self.err_i = tf.Variable(0.0)
-        self.prop = tf.zeros((1,180,1))
-
+        self.prop = tf.Variable(tf.zeros((1,180,1)))
+        self.remi = tf.Variable(tf.zeros((1,180,1)))
+        self.z = tf.Variable(mdl.patient.z)
+    
+    @tf.function
     def update(self,ref,y):
         u = tf.clip_by_value(stateless_pid(self.k,self.err,self.err_i,y,ref),0,40)
-        self.prop = tf.concat((self.prop[:,1:,:],[[[u]]]),axis=1)
+        self.prop.assign(tf.concat((self.prop[:,1:,:],[[[u]]]),axis=1))
+        self.remi.assign(self.prop*self.rho)
         self.err_i.assign_add(((ref-y)+self.err)/2)
         self.err.assign(ref-y)
-        return self.pred.mdl((self.prop,self.prop*self.rho,self.pred.patient.z))[-1][-1]
+        return self.pred((self.prop,self.prop*self.rho,self.pred.patient.z))[-1][-1]
+
     @tf.function
     def __call__(self,ref,y):
         return self.update(ref,y)
-class MPC:
+
+class AdaptativePID(PID):
+    def __init__(self,mdl,p=1,i=1,d=1,rho=1):
+        super().__init__(mdl,p=p,i=i,d=d,rho=rho)
+        self.iterations = tf.Variable(0)
+        self.last_ref = tf.Variable(0.5)
+        self.needs_reiter = tf.Variable(False)
+    
+    @tf.function
+    def update(self,ref,y):
+        self.iterations.assign_add(1)
+        curr_cost = adaptative_cost(tf.expand_dims(self.k,0),y0=y,ref=ref,i0=self.err_i,z=self.pred.z,pred=self.pred,prop=self.prop,remi=self.remi)
+        if ref != self.last_ref or self.needs_reiter or curr_cost>50:
+            cmp_k = tf.stack([self.k,adapt_PID(self.pred, ref, self.z, y, self.err_i, self.prop, self.remi, x0=self.k)])
+            switch_criteria = adaptative_cost(cmp_k,y0=y,ref=ref,i0=self.err_i,z=self.pred.z,pred=self.pred,prop=self.prop,remi=self.remi)
+            self.k.assign(cmp_k[tf.math.argmin(switch_criteria)])
+
+            if ref != self.last_ref:
+                self.needs_reiter.assign(tf.math.reduce_all(self.k == cmp_k[0]))
+            else:
+                self.needs_reiter.assign(False)
+
+            if not self.needs_reiter:
+                tf.print(self.iterations,switch_criteria,cmp_k[0],self.k)
+
+        self.last_ref.assign(ref)
+        return super().update(ref,y)
+
+
+class MPC(tf.Module):
     def __init__(self,patient: Patient,nnet: Model,horizon=10):
-        self.horizon = horizon 
-        self.patient = patient
-        self.prop = tf.zeros([1,180,1],dtype=tf.float64)
-        self.remi = tf.zeros([1,180,1],dtype=tf.float64)
+        self.horizon = tf.constant(horizon)
+        self.prop = tf.Variable(tf.zeros([1,180,1],dtype=tf.float32))
+        self.remi = tf.Variable(tf.zeros([1,180,1],dtype=tf.float32))
         self.pred = nnet
-
+        self.z = self.patient.z
+    
+    @tf.function
     def update(self,ref,x):
-        p,r = self.gen_infusion(ref,x-self.pred((self.prop,self.remi,self.patient.z)))
-        self.prop = tf.reshape(tf.concat((tf.transpose(self.prop[0,:,0]),[p[0]]),axis=0)[1:],(1,180,1))
-        self.remi = tf.reshape(tf.concat((tf.transpose(self.remi[0,:,0]),[r[0]]),axis=0)[1:],(1,180,1))
-        return self.pred((self.prop,self.remi,self.patient.z))[-1][-1]
-
+        p,r = self.gen_infusion(ref,x-self.pred((self.prop,self.remi,self.z)))
+        self.prop.assign(tf.reshape(tf.concat((tf.transpose(self.prop[0,:,0]),[p[0]]),axis=0)[1:],(1,180,1)))
+        self.remi.assign(tf.reshape(tf.concat((tf.transpose(self.remi[0,:,0]),[r[0]]),axis=0)[1:],(1,180,1)))
+        return self.pred((self.prop,self.remi,self.z))[-1][-1]
+    
+    @tf.function
     def gen_infusion(self,ref,bias):
         ref -= bias 
         maxiter = 1e6
-        loss = lambda x: mpc_loss(self.pred,self.patient.z,self.prop,self.remi,self.horizon,x,ref)
-        j = lambda x: mpc_loss_jac(self.pred,self.patient.z,self.prop,self.remi,self.horizon,x,ref)
-        h = lambda x: mpc_loss_hess(self.pred,self.patient.z,self.prop,self.remi,self.horizon,x,ref)
-        inputs = scipy.optimize.minimize(loss,tf.ones(self.horizon*2),jac=j,method='L-BFGS-B',options={'disp':False}).x
+        loss = tf.function(lambda x: tfp.math.value_and_gradient(mpc_loss(self.pred,self.patient.z,self.prop,self.remi,self.horizon,x,ref)))
+        inputs = tfp.optimize.lbfgs_minimize(loss,initial_position=tf.ones(self.horizon*2))
         return inputs[:self.horizon],inputs[self.horizon:]
+
+
 @tf.function
 def mpc_loss_hess(nnet,z,prop,remi,horizon,x,ref):
     x = tf.cast(x,prop.dtype)
@@ -117,6 +159,7 @@ def mpc_loss_jac(nnet,z,prop,remi,horizon,x,ref):
     if not tf.math.reduce_all(x>tf.ones(x.shape,x.dtype)*0.05) or not tf.math.reduce_all(x<=tf.ones(x.shape,x.dtype)*40):
         a *= 1e16     
     return tf.gradients(a,x)[0]
+
 @tf.function
 def mpc_loss(nnet,z,prop,remi,horizon,x,ref):
     x = tf.cast(x,prop.dtype)
@@ -163,17 +206,35 @@ def swarm_PID(pred,ref,z):
     return pso.optimize(vectorized_cost,pop_size=300,b=0.7,x_min=-4,x_max=4,dim=3,pred=pred,z=z)
 
 @tf.function
+def adapt_PID(pred,ref,z,y,i,prop,remi,x0=None):
+    #if not tf.is_tensor(x0):
+    return pso.optimize(adaptative_cost,pop_size=50,b=0.7,dim=3,x0=x0,x_min=-1,x_max=1,tol=1,max_iter=48,pred=pred,z=z,y0=y,i0=i,ref=ref,prop=prop,remi=remi)
+    #return pso.optimize(adaptative_cost,pop_size=50,b=0.7,dim=3,x0=x0,x_min=-2,x_max=2,tol=adaptative_cost(tf.expand_dims(x0,0),pred=pred,z=z,y0=y,i0=i,ref=ref,prop=prop,remi=remi),max_iter=20,pred=pred,z=z,y0=y,i0=i,ref=ref,prop=prop,remi=remi)
+
+@tf.function
 def vectorized_cost(y,pred=None,z=None):
     return pid_loss(y[:,0],y[:,1],y[:,2],1,tf.transpose(tf.repeat(0.5,y.shape[0])),140,pred,tf.repeat(z,y.shape[0],0))
 
 @tf.function
-def pid_loss(kp,ki,kd,rho,ref,n,mdl,z):
+def adaptative_cost(y,pred=None,z=None,y0=0.98,i0=0.0,ref=0.5,prop=None,remi=None):
+    return pid_loss(y[:,0],y[:,1],y[:,2],1,tf.transpose(tf.repeat(ref,y.shape[0])),40,pred,tf.repeat(z,y.shape[0],0),y0=y0,i0=i0,prop=prop,remi=remi)
+
+@tf.function
+def pid_loss(kp,ki,kd,rho,ref,n,mdl,z,y0=0.98,i0=0.0,prop=None,remi=None):
     last_err = [0.5-0.98]*kp.shape[0]
-    i = [0.0]*kp.shape[0]
-    y = [0.98]*kp.shape[0]
+    i = [i0]*kp.shape[0]
+    y = [y0]*kp.shape[0] 
     s = [0.0]*kp.shape[0]
-    prop = tf.zeros((kp.shape[0],180,1))
-    remi = tf.zeros((kp.shape[0],180,1))
+
+    if not tf.is_tensor(prop):
+        prop = tf.zeros((kp.shape[0],180,1))
+
+    if not tf.is_tensor(remi):
+        remi = tf.zeros((kp.shape[0],180,1))
+
+    prop = tf.broadcast_to(prop,(kp.shape[0],180,1))
+    remi = tf.broadcast_to(remi,(kp.shape[0],180,1))
+
     for j in range(n):
         err = ref-y
         i += (err+last_err)/2
@@ -234,43 +295,53 @@ def run_pid(kp,ki,kd,refs,mdl,z,rho=1):
         j += 1
     return tf.stack((ys.stack(),pus.stack(),rus.stack()))
 
+@tf.function
 def run_controller(c,rfs):
-    bis = [c.pred((tf.zeros((1,180,1)),tf.zeros((1,180,1)),c.patient.z))[-1][-1]]
+    bis = tf.TensorArray(tf.float32,size=0,dynamic_size=True,clear_after_read=False)
+    i = 0
+    bis = bis.write(i,c.pred((c.prop,c.prop*c.rho,c.z))[-1][-1])
     for r in rfs:
-        b = c.update(r,bis[-1])
-        bis.append(b)
-    return bis
+        b = c.update(r,bis.read(i))
+        i += 1
+        bis = bis.write(i,b)
+        tf.print(i,bis.read(i),r)
+    return bis.stack()
 
 def test():
     p = Patient(36,160,60,Gender.F)
     #n = Pharmacodynamic(p,2.0321,2.3266,13.9395,26.6474) 
     n = NNET(p)
     #pid_loss_plot(n,0.0)
+    #print(n(tf.zeros((1,180,1)),tf.zeros((1,180,1))))
 
-    c = MPC(p,n.mdl,5)
+#    c = MPC(p,n.mdl,5)
     #x = n(np.zeros((1,180,1)),np.zeros((1,180,1)))
     #ys = [x]
     #for i in range(50):
     #    x = mpc.update(0.5,x)[-1][-1]
     #    ys.append(x)
     #    print(ys)
-    #st = time.time() 
+    st = time.time() 
     #pid,_ = fit_PID(n,0.5,ys)
     #c = PID(p,n,*pid)
     #fig,ax = plt.subplots(subplot_kw=dict(projection='3d'))
     #ax.plot_surface(*PID_plot(n))
-    #optimized_values = swarm_PID(n,0.5)
+    optimized_values = swarm_PID(n,0.5,n.z)
     #optimized_values =get_PID(n,0.5)
     #optimized_values = gd_PID(n,0.5)
     #optimized_values =get_PID(n,0.5,swarm_PID(n,0.5))
     #optimized_values =[-10,np.inf,0]
-    #c = PID(n,*optimized_values)
+    c = AdaptativePID(n,*optimized_values)
+    baseline = PID(n,*optimized_values)
     #c = PID(n,-3,-0.003,3)
-    #print(time.time()-st,c.k)
-    #print(bis)
+#    print(bis)
     refs = data_generator.rfs 
     plt.figure()
-    plt.plot(run_controller(c,refs))
+    plt.plot(run_controller(c,refs),label='Adaptative')
+    plt.plot(run_controller(baseline,refs),label='Fixed parameters')
+    plt.plot(refs,label='Reference')
+    plt.legend()
+    print(time.time()-st,c.k)
     """
     plt.figure()
     plt.title("PSO")
