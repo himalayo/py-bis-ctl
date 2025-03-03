@@ -43,7 +43,7 @@ def step(fn,f_p,v,b,c1,c2,p,g,x,minimum,maximum,population_size,dimension,**kwar
     new_x = random(x+new_v,minimum,maximum)
     new_p,new_f_p = update_p_best(fn,new_x,f_p,p,**kwargs)
     new_g = update_g_best(new_f_p,new_p)
-    tf.print(new_g,tf.math.reduce_min(new_f_p))
+    tf.print("pso",new_g,tf.math.reduce_min(new_f_p))
     return new_v,new_x,new_p,new_f_p,new_g
 
 @tf.function
@@ -65,7 +65,7 @@ def optimize(fitness_fn,pop_size=100,dim=2,b=0.9,c1=0.8,c2=0.5,x_min=-1,x_max=1,
                 v = start_velocities(pop_size,dim,x_min+tf.math.reduce_min(x0),x_max+tf.math.reduce_max(x0))
             if i%50 == 0:
                 tf.print('Restarting...')
-                x = build_swarm(pop_size,dim,x_min,x_max)+x0
+                x = tf.concat((tf.expand_dims(g,0),build_swarm(pop_size-1,dim,x_min,x_max)+x0),0)
                 p = x
                 f_p = fitness_fn(x,**kwargs)
                 g = p[tf.math.argmin(input=f_p)]

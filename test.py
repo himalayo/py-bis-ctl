@@ -2,7 +2,7 @@ import matplotlib.pyplot as plt
 
 import anesthesia_models
 import patient
-import predictors
+#import predictors
 import controllers
 
 

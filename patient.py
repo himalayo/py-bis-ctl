@@ -19,6 +19,8 @@ class Gender(Enum):
                 val = Gender.M if value == 0 else Gender.F 
             case None:
                 val = Gender.M 
+            case _:
+                val = Gender.M if int(value) == 0 else Gender.F
         return val
 
     def __str__(self):
@@ -44,9 +46,9 @@ def from_z(zs):
 
 class Patient:
     def __init__(self,age: float, height: float, weight: float, gender: Gender):
-        self.age = age
-        self.height = height
-        self.weight = weight 
+        self.age = float(age)
+        self.height = float(height)
+        self.weight = float(weight)
         self.gender = gender
         if self.gender.is_female():
             self.lbm = (1.07*self.weight) - (148*((self.weight/self.height)**2)) 
